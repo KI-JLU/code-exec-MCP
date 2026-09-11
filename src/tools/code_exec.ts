@@ -142,6 +142,17 @@ export function createCodeExecTool(
       const baseTmpDir = path.join(process.cwd(), ".tmp");
       await fs.mkdir(baseTmpDir, { recursive: true });
       const dir = await fs.mkdtemp(path.join(baseTmpDir, "sandbox-"));
+      // mkdtemp creates the dir 0700, but the sandbox container runs as a
+      // different uid (sandboxuser) and must traverse it to read code.py.
+      await fs.chmod(dir, 0o755);
+
+      // When this server itself runs inside a container sharing the host's
+      // Docker socket (Docker-out-of-Docker), the `docker run -v` source is
+      // resolved by the HOST daemon, so it must be a host path — not this
+      // container's path. SANDBOX_HOST_TMP is the host dir bind-mounted to
+      // baseTmpDir; falls back to baseTmpDir when running directly on a host.
+      const hostBaseTmp = process.env.SANDBOX_HOST_TMP || baseTmpDir;
+      const hostDir = path.join(hostBaseTmp, path.basename(dir));
 
       let stdout = "", stderr = "", runError: Error | undefined;
       let durationMs = 0, timedOut = false;
@@ -154,7 +165,7 @@ export function createCodeExecTool(
         const timeoutId = setTimeout(() => { ac.abort(); timedOut = true; }, cfg.wallClockMs);
 
         try {
-          const result = await runner.run(dir, cfg, ac.signal);
+          const result = await runner.run(hostDir, cfg, ac.signal);
           stdout = result.stdout;
           stderr = result.stderr;
           runError = result.runError;
