@@ -20,7 +20,10 @@ src/
 └── tools/
     └── code_exec.ts      # Python sandbox execution tool
 Dockerfile                # MCP server image
-Dockerfile.sandbox        # Python sandbox image (numpy, pandas, scipy, matplotlib)
+Dockerfile.sandbox        # Python sandbox image (scientific stack, python-pptx + hawki_slides, node + pptxgenjs, LibreOffice)
+sandbox/sitecustomize.py  # In every sandbox Python: self-explaining subprocess errors, documents in /tmp delivered at exit
+sandbox/hawki_slides/     # Deck helper on python-pptx: JLU template, drawn styles, attached templates
+sandbox/templates/        # JLU-de.potx, JLU-en.potx (copies of templates/)
 docker-compose.yml        # Production deployment
 docker-entrypoint.sh      # Container startup — fixes .tmp ownership for mcp user
 ```
@@ -31,9 +34,82 @@ Executes a Python snippet in a sandboxed gVisor container.
 
 - No network access
 - Read-only filesystem (`/tmp` is writable, 64 MB tmpfs)
-- Libraries: `numpy`, `pandas`, `scipy`, `matplotlib`
+- Libraries: `numpy`, `pandas`, `scipy`, `matplotlib`, `python-pptx`; `hawki_slides` for decks; `node` + `pptxgenjs`
+- Input files: `files: [{ name, content_base64 }]` on the call, read-only at `/work/<name>`
+- Binaries: `soffice` (LibreOffice Impress) and `pdftoppm`, to render a deck back to slide images
 - Timeout: 10 seconds
 - Output cap: 512 KB stdout + stderr
+- Every call is a fresh process and a fresh `/tmp`: nothing carries over between calls
+- stderr comes back too: appended under `[stderr]` when the snippet exited cleanly but something it ran did not (a node script failing inside a `try`), in front of stdout when the snippet itself failed
+- A failed subprocess explains itself: `print(e)` on a `CalledProcessError` includes the captured stderr (`sandbox/sitecustomize.py`)
+- Documents are delivered by leaving them in `/tmp`: every `.pptx`, `.docx`, `.xlsx`, `.csv` and `.pdf` there is printed as a named data URI when the run ends, unless the program printed it already; a PDF next to a `.pptx`/`.docx` of the same name is treated as LibreOffice's conversion step and skipped
+
+### Building a PowerPoint deck
+
+`hawki_slides` ([sandbox/hawki_slides](sandbox/hawki_slides)) is the way in: a
+deck in a dozen Python calls on the JLU corporate template (German or English
+by language), one of HAWKI's own drawn styles, or a template the user attached.
+Layout, fonts and the logo come from the template; the program that writes
+the deck does not have to know python-pptx, whose API is exactly what models
+got wrong on the first try.
+
+```python
+from hawki_slides import Deck
+
+deck = Deck(title="Anthropomorphisierung von LLM", author="HAWKI", lang="de")   # JLU template, German
+deck.title("Anthropomorphisierung von LLM", "Warum wir Sprachmodelle vermenschlichen")
+deck.bullets("Was bedeutet das?", ["Punkt eins", {"text": "Punkt zwei", "sub": ["Detail"]}], sources=["https://..."])
+deck.cards("Vier Signale", [{"heading": "Dialog", "text": "..."}, {"heading": "Ich-Perspektive", "text": "..."}])
+deck.two_columns("Hilfreich vs. irreführend", {"heading": "Hilfreich", "items": ["..."]}, {"heading": "Irreführend", "items": ["..."]})
+deck.quote("Menschlich genug, um zu helfen.", "Fazit")
+deck.closing("Danke · Fragen?")
+deck.save("/tmp/anthropomorphisierung.pptx")   # delivered when the run ends - nothing to print
+```
+
+Where the look comes from:
+
+| | |
+|---|---|
+| `Deck(lang="de")` (default) | JLU template, German (`sandbox/templates/JLU-de.potx`) |
+| `Deck(lang="en")` | JLU template, English |
+| `Deck(template="attached")` | the `.potx`/`.pptx` the caller passed in `files` (at `/work/<name>`) |
+| `Deck(style="purple")` | HAWKI's drawn style; also `blue`, `green`, `red`, `slate` |
+
+Methods: `title`, `bullets`, `cards` (2-6), `two_columns`, `quote`, `closing`,
+`image(title, path, caption)`, `save` (a `/tmp` path). Each slide method takes
+`notes=` and `sources=`, both land in the speaker notes. `deck.raw` is the
+python-pptx `Presentation` for anything else. A template's sample slides are
+dropped, but the pictures on them - a corporate template often keeps its logo
+there rather than on the layout - are carried onto the slides the deck adds.
+
+### Passing files in
+
+`code_exec` takes an optional `files` array (`[{ name, content_base64 }]`, at
+most 20 files and 25 MB); each appears read-only at `/work/<name>` next to the
+program. That is how an attached template, or a CSV to analyse, reaches the
+sandbox.
+
+Raw pptxgenjs (node) and python-pptx are installed too, for the rare slide the
+helper cannot express.
+
+### Checking a deck before returning it
+
+pptxgenjs lays slides out in absolute inches, so nothing but a look at the result
+catches a text box placed on top of another one. Convert and rasterise in the
+same call - the sandbox filesystem does not survive between calls - and read the
+PNGs back as images:
+
+```python
+import subprocess, glob
+
+subprocess.run(["soffice", "--headless", "--convert-to", "pdf",
+                "--outdir", "/tmp", "/tmp/deck.pptx"], check=True)
+subprocess.run(["pdftoppm", "-png", "-r", "80", "/tmp/deck.pdf", "/tmp/slide"], check=True)
+print(sorted(glob.glob("/tmp/slide*.png")))
+```
+
+Build, convert and rasterise for nine slides measures ~0.7 s of the 10 s budget
+(without `runsc`; gVisor adds syscall overhead on top).
 
 ### Returning a plot
 
@@ -85,6 +161,9 @@ Health check: `http://localhost:3001/health` → `{"status":"ok","uptime_s":…,
 |----------|---------|-------------|
 | `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio` or `http` |
 | `MCP_PORT` | `3001` | HTTP port for Streamable HTTP transport |
+| `SANDBOX_IMAGE` | `code-exec-sandbox:latest` | Image every snippet runs in |
+| `SANDBOX_RUNTIME` | `runsc` | Container runtime for the sandbox; set to an empty string for the daemon's default runtime on a machine without gVisor (local development only) |
+| `SANDBOX_HOST_TMP` | `<cwd>/.tmp` | Host path of the `.tmp` bind mount, needed when this server itself runs in a container (Docker-out-of-Docker) |
 
 ## Session Management
 

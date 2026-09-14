@@ -23,7 +23,9 @@ ENV MCP_TRANSPORT=http
 ENV MCP_PORT=3001
 
 ARG DOCKER_GID=985
-RUN apk add --no-cache su-exec && \
+# docker-cli: the server spawns every sandbox with `docker run` against the
+# host's socket, so the binary has to be in this image.
+RUN apk add --no-cache su-exec docker-cli && \
     chmod +x /usr/local/bin/docker-entrypoint.sh && \
     addgroup -S mcp && adduser -S mcp -G mcp && \
     (addgroup -g ${DOCKER_GID} docker 2>/dev/null || addgroup docker) && \

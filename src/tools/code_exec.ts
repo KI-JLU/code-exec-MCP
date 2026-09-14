@@ -12,13 +12,29 @@ const execFileAsync = promisify(execFile);
 // ---------------------------------------------------------------------------
 
 const inputSchema = z.object({
+  files: z
+    .array(
+      z.object({
+        name: z.string().describe("File name; it is available in the sandbox at /work/<name>."),
+        content_base64: z.string().describe("The file's bytes, base64 encoded."),
+      })
+    )
+    .max(20)
+    .optional()
+    .describe(
+      "Files to place next to the program, read-only at /work/<name> - a template the user attached, " +
+      "a data file to analyse. At most 20 files and 25 MB in total."
+    ),
   code: z
     .string()
     .describe(
       "Python source code to execute. " +
       "Stdlib + pandas + numpy + scipy + matplotlib preinstalled. " +
-      "No network. /tmp is a 64 MB tmpfs (writable). " +
-      "Save plots with plt.savefig('/tmp/plot.png'), then read and base64-encode to return image data."
+      "No network. /tmp is a 64 MB tmpfs (writable); the working directory /work is not - it holds this program and the files passed in `files`. " +
+      "Save plots with plt.savefig('/tmp/plot.png'), then read and base64-encode to return image data. " +
+      "For PowerPoint decks, node and pptxgenjs are installed: write the deck script to /tmp and run it " +
+      "with subprocess.run(['node', '/tmp/deck.js']), then base64-encode the .pptx it wrote. " +
+      "require('pptxgenjs') resolves from anywhere - NODE_PATH is set."
     ),
 });
 
@@ -35,13 +51,26 @@ export interface CodeExecConfig {
   runtime?: string;
 }
 
+/**
+ * The runtime the sandbox container runs under. gVisor (`runsc`) in production;
+ * SANDBOX_RUNTIME="" selects the daemon's default runtime for a machine that
+ * has no gVisor - Docker Desktop, a developer's laptop - where the isolation
+ * is the developer's own and the point is to exercise the image.
+ */
+function runtimeFromEnv(): string | undefined {
+  const raw = process.env.SANDBOX_RUNTIME;
+  if (raw === undefined) return "runsc";
+  const trimmed = raw.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
 export const defaultCodeExecConfig: CodeExecConfig = {
-  image: "code-exec-sandbox:latest",
+  image: process.env.SANDBOX_IMAGE?.trim() || "code-exec-sandbox:latest",
   wallClockMs: 10000,
   memoryMB: 256,
   cpus: 1.0,
   stdoutBytes: 512 * 1024,
-  runtime: "runsc",
+  runtime: runtimeFromEnv(),
 };
 
 export interface RunnerResult {
@@ -62,6 +91,39 @@ function capBytes(b: string | Buffer, cap: number): string {
   const buf = Buffer.isBuffer(b) ? b : Buffer.from(b, "utf-8");
   if (cap <= 0 || buf.length <= cap) return buf.toString("utf-8");
   return Buffer.concat([buf.subarray(0, cap), Buffer.from("\n[truncated]")]).toString("utf-8");
+}
+
+const MAX_INPUT_FILES_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Files the caller wants next to the program. They are written into the same
+ * directory as code.py, which is bind-mounted read-only at /work, so a file
+ * named deck.potx is /work/deck.potx inside the sandbox. Names are reduced to a
+ * basename - a caller does not get to choose where in the directory tree its
+ * bytes land - and "code.py" is refused, that name is the program's.
+ */
+function decodeInputFiles(files: { name: string; content_base64: string }[]): { name: string; bytes: Buffer }[] {
+  const seen = new Set<string>();
+  let total = 0;
+  const decoded: { name: string; bytes: Buffer }[] = [];
+
+  for (const file of files) {
+    const name = path.basename(file.name.trim());
+    if (!name || name === "." || name === ".." || name.startsWith(".") || name === "code.py") {
+      throw new Error(`code_exec: invalid file name "${file.name}"`);
+    }
+    if (seen.has(name)) throw new Error(`code_exec: duplicate file name "${name}"`);
+    seen.add(name);
+
+    const bytes = Buffer.from(file.content_base64, "base64");
+    total += bytes.length;
+    if (total > MAX_INPUT_FILES_BYTES) {
+      throw new Error(`code_exec: files too large (max ${MAX_INPUT_FILES_BYTES / 1024 / 1024} MB in total)`);
+    }
+    decoded.push({ name, bytes });
+  }
+
+  return decoded;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,12 +187,13 @@ export function createCodeExecTool(
     name: "code_exec",
     description:
       "Execute Python code in a sandboxed gVisor container. " +
-      "No network. Stdlib + pandas + numpy + scipy + matplotlib. " +
-      "Use for data analysis, calculations, and chart generation. " +
-      "Save plots to /tmp and base64-encode them for image output. " +
+      "No network. Stdlib + pandas + numpy + scipy + matplotlib, plus node and pptxgenjs " +
+      "for building PowerPoint decks. " +
+      "Use for data analysis, calculations, chart generation and .pptx authoring. " +
+      "Save plots and decks to /tmp and base64-encode them for binary output. " +
       "Output capped at 512 KB stdout + stderr.",
     inputSchema,
-    handler: async ({ code }) => {
+    handler: async ({ code, files }) => {
       if (!isEnabled()) throw new Error("code_exec: tool is disabled");
 
       code = code.trim();
@@ -138,6 +201,8 @@ export function createCodeExecTool(
       if (Buffer.byteLength(code, "utf-8") > 256 * 1024) {
         throw new Error("code_exec: code too large (max 256 KB)");
       }
+
+      const inputFiles = decodeInputFiles(files ?? []);
 
       const baseTmpDir = path.join(process.cwd(), ".tmp");
       await fs.mkdir(baseTmpDir, { recursive: true });
@@ -159,6 +224,9 @@ export function createCodeExecTool(
 
       try {
         await fs.writeFile(path.join(dir, "code.py"), code, { mode: 0o644 });
+        for (const file of inputFiles) {
+          await fs.writeFile(path.join(dir, file.name), file.bytes, { mode: 0o644 });
+        }
 
         const startTime = Date.now();
         const ac = new AbortController();
@@ -193,6 +261,13 @@ export function createCodeExecTool(
       } else if (runError) {
         meta.exit_error = runError.message;
         text = stderr ? `${stderr}\n---\n${stdout}` : stdout;
+      } else if (stderr.trim() !== "") {
+        // A clean exit with something on stderr is usually a subprocess that
+        // failed inside the snippet - node refusing to write, soffice choking on
+        // a file - which the snippet caught and turned into a generic message.
+        // Without the stderr the model sees "exit status 1" and nothing else,
+        // and its next attempt is a guess.
+        text = `${stdout}\n[stderr]\n${stderr}`;
       }
 
       return {
