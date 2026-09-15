@@ -42,11 +42,14 @@ RUN pip install --no-cache-dir numpy pandas scipy matplotlib python-pptx
 # layout is absolute coordinates, and nothing else catches a text box placed on
 # top of another one. libreoffice-impress pulls the Impress filters only; there
 # is no JRE - see the javaldx stub below for what that would otherwise print.
+# rsvg-convert rasterises an SVG the model drew before hawki_slides puts it on
+# a slide - python-pptx embeds bitmaps only; LibreOffice Draw is the fallback.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libreoffice-impress \
         libreoffice-core \
         fonts-dejavu-core \
         poppler-utils \
+        librsvg2-bin \
     && rm -rf /var/lib/apt/lists/* \
     # oosplash launches javaldx to find a JRE on every start and prints
     # "Warning: failed to launch javaldx - java may not function correctly"

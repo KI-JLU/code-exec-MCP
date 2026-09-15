@@ -72,8 +72,9 @@ Where the look comes from:
 |---|---|
 | `Deck(lang="de")` (default) | JLU template, German (`sandbox/templates/JLU-de.potx`) |
 | `Deck(lang="en")` | JLU template, English |
-| `Deck(template="attached")` | the `.potx`/`.pptx` the caller passed in `files` (at `/work/<name>`) |
+| `Deck(template="attached")` | the `.potx`/`.pptx` the caller passed in `files` (at `/work/<name>`), as a template: layouts kept, slides dropped |
 | `Deck(style="purple")` | HAWKI's drawn style; also `blue`, `green`, `red`, `slate` |
+| `Deck.open("/work/<name>.pptx")` | continue a deck built earlier: its slides stay, new ones go on its layouts (`style=` for a drawn deck) |
 
 Methods: `title`, `bullets`, `cards` (2-6), `two_columns`, `quote`, `closing`,
 `image(title, path, caption)`, `save` (a `/tmp` path). Each slide method takes
@@ -81,6 +82,12 @@ Methods: `title`, `bullets`, `cards` (2-6), `two_columns`, `quote`, `closing`,
 python-pptx `Presentation` for anything else. A template's sample slides are
 dropped, but the pictures on them - a corporate template often keeps its logo
 there rather than on the layout - are carried onto the slides the deck adds.
+
+`image()` takes a bitmap or an SVG - the SVG is rasterised first (`rsvg-convert`,
+else LibreOffice Draw). A bare file name is looked up in `/work`, so a picture
+the caller passed in `files` is `image("...", "otter.png")`. `save()` writes the
+deck title and author into the file's core properties, which is what
+`Deck.open()` reads back.
 
 ### Passing files in
 

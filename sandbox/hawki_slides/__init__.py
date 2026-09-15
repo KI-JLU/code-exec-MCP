@@ -20,8 +20,9 @@ for the same reason; this is HAWKI's.
     deck.save("/tmp/anthropomorphisierung.pptx")
 
 Where the look comes from, in this order:
-  - template="attached"                   the .potx or .pptx the user attached
-    (or template="/work/<name>" to name one of several)
+  - template="attached"                   the .potx or .pptx the user attached,
+    (or template="/work/<name>" to name one of several) used as a TEMPLATE:
+    its layouts stay, its slides are dropped
   - style="jlu" (the default)             the JLU corporate template, German or
                                           English by `lang`
   - style="purple" | "blue" | "green" | "red" | "slate"
@@ -30,6 +31,15 @@ Where the look comes from, in this order:
 Every slide method accepts notes="..." and sources=[...]; both land in the
 speaker notes, the sources as a "[Sources]" list. Every method returns the
 Deck, so calls chain.
+
+Continuing a deck built earlier - the .pptx HAWKI placed in /work:
+
+    deck = Deck.open("/work/anthropomorphisierung.pptx")   # keeps its slides
+    deck.image("Der Otter", "/work/otter.png", caption="Generiert mit HAWKI")
+    deck.save("/tmp/anthropomorphisierung.pptx")
+
+image() takes PNG, JPEG, GIF, BMP, TIFF - and SVG, which is rasterised first.
+A bare file name is looked up in /work, so image("...", "otter.png") works.
 """
 
 from __future__ import annotations
@@ -107,6 +117,50 @@ def _resolve_template(template) -> str:
             template, ATTACHED_DIR, ", ".join(sorted(os.listdir(ATTACHED_DIR))) if os.path.isdir(ATTACHED_DIR) else "-"
         )
     )
+
+
+def _resolve_file(path, what="file") -> str:
+    """
+    A file the program refers to: a path as it is, else a bare name in /work -
+    where HAWKI places the files of the conversation the call asked for.
+    """
+    value = _s(path)
+    if value and os.path.exists(value):
+        return value
+    candidate = os.path.join(ATTACHED_DIR, os.path.basename(value))
+    if value and os.path.exists(candidate):
+        return candidate
+    listing = ", ".join(n for n in sorted(os.listdir(ATTACHED_DIR)) if n != "code.py") if os.path.isdir(ATTACHED_DIR) else "-"
+    raise FileNotFoundError(
+        "hawki_slides: %s not found: %r. Files in %s: %s. A file of this conversation is only there "
+        "when its name is listed in the `files` argument of the tool call." % (what, path, ATTACHED_DIR, listing or "none")
+    )
+
+
+def _rasterize_svg(path: str) -> str:
+    """
+    An SVG as a PNG in /tmp - python-pptx embeds bitmaps only. rsvg-convert
+    when the image has it (fast, exact), else LibreOffice Draw, which is
+    there for the deck preview anyway.
+    """
+    import shutil
+    import subprocess
+
+    target = os.path.join("/tmp", os.path.splitext(os.path.basename(path))[0] + "_svg.png")
+    if shutil.which("rsvg-convert"):
+        subprocess.run(["rsvg-convert", "--width", "1600", "--keep-aspect-ratio", "-o", target, path],
+                       check=True, capture_output=True, text=True)
+        return target
+
+    outdir = "/tmp/_hawki_svg"
+    os.makedirs(outdir, exist_ok=True)
+    subprocess.run(["soffice", "--headless", "--convert-to", "png", "--outdir", outdir, path],
+                   check=True, capture_output=True, text=True)
+    produced = os.path.join(outdir, os.path.splitext(os.path.basename(path))[0] + ".png")
+    if not os.path.exists(produced):
+        raise RuntimeError("hawki_slides: LibreOffice produced no PNG for %r" % path)
+    os.replace(produced, target)
+    return target
 
 
 def template_for(lang: str | None) -> str:
@@ -244,6 +298,61 @@ class Deck:
             self.prs.slide_width = Inches(W)
             self.prs.slide_height = Inches(H)
 
+    @classmethod
+    def open(cls, path, style=None, title=None, author="HAWKI", lang="de"):
+        """
+        Continues a deck built earlier: opens the .pptx WITH its slides and adds
+        to them on its own layouts. Deck(template=...) is the other thing - it
+        keeps only the layouts. Pass style="purple" (or blue, green, red, slate)
+        for a deck that was drawn in one of those styles, so new slides match.
+        """
+        source = _resolve_file(path, "deck")
+        if not source.lower().endswith(".pptx"):
+            raise ValueError("hawki_slides: Deck.open() continues a .pptx; for a .potx use Deck(template=%r)" % path)
+
+        deck = cls.__new__(cls)
+        deck.author = _s(author)
+        deck.lang = _s(lang) or "de"
+        deck.date = _dt.date.today().strftime("%d.%m.%Y" if not deck.lang.lower().startswith("en") else "%Y-%m-%d")
+        deck.template_path = source
+        deck.prs = Presentation(source)
+        deck.deck_title = _s(title) or _s(deck.prs.core_properties.title)
+        deck.slide_count = len(deck.prs.slides)
+
+        if style is not None and str(style).lower() in STYLES:
+            deck.mode = "drawn"
+            deck.colors = STYLES[str(style).lower()]
+            return deck
+        if style is not None and str(style).lower() != "jlu":
+            raise ValueError("hawki_slides: unknown style %r - one of jlu, %s" % (style, ", ".join(STYLES)))
+
+        deck.mode = "template"
+        deck._resolve_layouts()
+
+        # The brand marks a layout carries on its slides rather than in the
+        # layout itself, as _open_template() finds them on a template's sample
+        # slides. Here the slides are content, so only a picture that repeats
+        # on EVERY slide of a layout (and there are at least two) counts - a
+        # logo does, the otter on the image slide does not.
+        by_layout = {}
+        for slide in deck.prs.slides:
+            pictures = {}
+            for shape in slide.shapes:
+                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE and not shape.is_placeholder:
+                    try:
+                        pictures[(shape.image.sha1, shape.left, shape.top, shape.width, shape.height)] = shape.image.blob
+                    except Exception:
+                        pass
+            by_layout.setdefault(slide.slide_layout.name, []).append(pictures)
+        brand = {}
+        for layout_name, per_slide in by_layout.items():
+            if len(per_slide) < 2:
+                continue
+            common = set(per_slide[0]).intersection(*per_slide[1:])
+            brand[layout_name] = [(per_slide[0][key], key[1], key[2], key[3], key[4]) for key in common]
+        deck.prs._hawki_brand_pictures = brand
+        return deck
+
     # ------------------------------------------------------------------ layouts
 
     def _resolve_layouts(self):
@@ -295,7 +404,11 @@ class Deck:
             if kind in (PP_PLACEHOLDER.DATE, PP_PLACEHOLDER.FOOTER, PP_PLACEHOLDER.SLIDE_NUMBER):
                 continue
             if kind == PP_PLACEHOLDER.PICTURE:
-                self._remove(ph)
+                # A picture placeholder that insert_picture() filled is a
+                # <p:pic> and keeps the PICTURE type - it stays. The empty
+                # <p:sp> frame goes, or the slide shows "click to add picture".
+                if not ph._element.tag.endswith("}pic"):
+                    self._remove(ph)
             elif ph.has_text_frame and not ph.text_frame.text.strip():
                 self._remove(ph)
 
@@ -628,8 +741,9 @@ class Deck:
         return self
 
     def image(self, title, path, caption=None, notes=None, sources=None):
-        if not os.path.exists(_s(path)):
-            raise FileNotFoundError("hawki_slides: image not found: %r" % path)
+        path = _resolve_file(path, "image")
+        if path.lower().endswith(".svg"):
+            path = _rasterize_svg(path)
         if self.mode == "drawn":
             slide = self._drawn_slide()
             self._drawn_heading(slide, title)
@@ -671,6 +785,11 @@ class Deck:
             raise ValueError("hawki_slides: save() needs a path under /tmp - the working directory is read-only (got %r)" % path)
         if not path.lower().endswith(".pptx"):
             path += ".pptx"
+        # Written into the file so Deck.open() finds the title and author again.
+        if self.deck_title:
+            self.prs.core_properties.title = self.deck_title
+        if self.author:
+            self.prs.core_properties.author = self.author
         self.prs.save(path)
         return path
 
