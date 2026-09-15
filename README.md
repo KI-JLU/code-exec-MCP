@@ -164,6 +164,36 @@ Health check: `http://localhost:3001/health` → `{"status":"ok","uptime_s":…,
 | `SANDBOX_IMAGE` | `code-exec-sandbox:latest` | Image every snippet runs in |
 | `SANDBOX_RUNTIME` | `runsc` | Container runtime for the sandbox; set to an empty string for the daemon's default runtime on a machine without gVisor (local development only) |
 | `SANDBOX_HOST_TMP` | `<cwd>/.tmp` | Host path of the `.tmp` bind mount, needed when this server itself runs in a container (Docker-out-of-Docker) |
+| `SANDBOX_WALL_CLOCK_MS` | `10000` | Hard kill after this long. A deck that is built, converted by LibreOffice and rasterised in one run needs far more than a plot does; HAWKI allows this tool 120 s, so stay under that |
+| `SANDBOX_MEMORY_MB` | `256` | Memory limit per run (swap is pinned to the same value). LibreOffice does not fit in the default |
+| `SANDBOX_CPUS` | `1.0` | CPU limit per run |
+| `SANDBOX_TMPFS_MB` | `64` | Size of the writable `/tmp`, which holds a generated deck, its PDF and the slide PNGs |
+| `SANDBOX_STDOUT_BYTES` | `524288` | Cap on captured stdout and stderr |
+
+An unreadable or non-positive value for any of the numeric knobs is ignored with a line on stderr, and the default applies.
+
+## Second server for a new sandbox image
+
+The image with the document toolchain changes behaviour for every caller: a `.pptx`, `.docx`, `.xlsx`, `.csv` or `.pdf` left in `/tmp` is delivered as a data URI when the run ends. A client that does not know that convention - a HAWKI older than the code interpreter's file delivery, or any other consumer on the gateway - passes that base64 straight to its model. So the new image does not replace the old one under the running server. It gets a second server on another port, reached through a gateway alias of its own, while production keeps `:3001` and `code-exec-sandbox:latest`:
+
+```bash
+# in a directory of its own, so the production checkout is untouched
+docker build -f Dockerfile.sandbox -t code-exec-sandbox:pptx .
+docker compose -p code-exec-mcp-next -f docker-compose.next.yml up -d --build
+```
+
+`docker-compose.next.yml` runs on port 3002, points `SANDBOX_IMAGE` at the new tag and raises the limits the document toolchain needs. Then add a second MCP server entry in the gateway that points at `http://<host>:3002/mcp`, and the client picks the image by which alias it calls - in HAWKI, `HAWKI_CODE_EXEC_MCP_SERVER`.
+
+**Behind a proxy** (a host without a direct route to the internet) both builds need it passed in; the Dockerfiles declare `http_proxy`/`https_proxy` as build args, so nothing is baked into the image:
+
+```bash
+docker build -f Dockerfile.sandbox -t code-exec-sandbox:pptx \
+  --build-arg http_proxy=http://10.60.3.254:3128 \
+  --build-arg https_proxy=http://10.60.3.254:3128 .
+
+BUILD_HTTP_PROXY=http://10.60.3.254:3128 BUILD_HTTPS_PROXY=http://10.60.3.254:3128 \
+  docker compose -p code-exec-mcp-next -f docker-compose.next.yml up -d --build
+```
 
 ## Session Management
 

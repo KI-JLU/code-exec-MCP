@@ -1,5 +1,14 @@
 FROM node:22-alpine AS builder
 
+# A build behind a proxy (ki-mcp01 has no direct route to the internet) passes
+# --build-arg http_proxy=... --build-arg https_proxy=...; declaring the ARGs here
+# is what puts them in scope for the RUN steps below. They are build time only -
+# unlike an ENV they are not baked into the image, so a sandbox does not carry a
+# proxy address it must never use (it runs with --network=none).
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -10,6 +19,15 @@ COPY src/ ./src/
 RUN npm run build
 
 FROM node:22-alpine
+
+# A build behind a proxy (ki-mcp01 has no direct route to the internet) passes
+# --build-arg http_proxy=... --build-arg https_proxy=...; declaring the ARGs here
+# is what puts them in scope for the RUN steps below. They are build time only -
+# unlike an ENV they are not baked into the image, so a sandbox does not carry a
+# proxy address it must never use (it runs with --network=none).
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
 
 WORKDIR /app
 

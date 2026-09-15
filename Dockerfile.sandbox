@@ -5,9 +5,29 @@
 # that starts - it is launched from inside the snippet with subprocess.run.
 # ---------------------------------------------------------------------------
 FROM node:22-slim AS nodebuild
+
+# A build behind a proxy (ki-mcp01 has no direct route to the internet) passes
+# --build-arg http_proxy=... --build-arg https_proxy=...; declaring the ARGs here
+# is what puts them in scope for the RUN steps below. They are build time only -
+# unlike an ENV they are not baked into the image, so a sandbox does not carry a
+# proxy address it must never use (it runs with --network=none).
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 RUN npm install -g pptxgenjs@3.12.0
 
 FROM python:3.13-slim
+
+# A build behind a proxy (ki-mcp01 has no direct route to the internet) passes
+# --build-arg http_proxy=... --build-arg https_proxy=...; declaring the ARGs here
+# is what puts them in scope for the RUN steps below. They are build time only -
+# unlike an ENV they are not baked into the image, so a sandbox does not carry a
+# proxy address it must never use (it runs with --network=none).
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 
 # Install necessary scientific computing libraries
 # We use --no-cache-dir to keep the image size down

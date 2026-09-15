@@ -47,6 +47,8 @@ export interface CodeExecConfig {
   wallClockMs: number;
   memoryMB: number;
   cpus: number;
+  /** Size of the writable /tmp inside the sandbox; a deck, its PDF and the slide PNGs live there. */
+  tmpfsMB: number;
   stdoutBytes: number;
   runtime?: string;
 }
@@ -57,6 +59,27 @@ export interface CodeExecConfig {
  * has no gVisor - Docker Desktop, a developer's laptop - where the isolation
  * is the developer's own and the point is to exercise the image.
  */
+/**
+ * A numeric limit from the environment, so a deployment can be tuned without a
+ * rebuild. The document toolchain is the reason this exists: LibreOffice needs
+ * noticeably more time and memory than a matplotlib plot, and how much more
+ * depends on the host - two slow cores under gVisor are not a developer's
+ * laptop. An unreadable or non-positive value falls back rather than crippling
+ * the sandbox.
+ */
+function numberFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    console.error(`code_exec: ignoring invalid ${name}="${raw}", using ${fallback}`);
+    return fallback;
+  }
+
+  return value;
+}
+
 function runtimeFromEnv(): string | undefined {
   const raw = process.env.SANDBOX_RUNTIME;
   if (raw === undefined) return "runsc";
@@ -66,10 +89,11 @@ function runtimeFromEnv(): string | undefined {
 
 export const defaultCodeExecConfig: CodeExecConfig = {
   image: process.env.SANDBOX_IMAGE?.trim() || "code-exec-sandbox:latest",
-  wallClockMs: 10000,
-  memoryMB: 256,
-  cpus: 1.0,
-  stdoutBytes: 512 * 1024,
+  wallClockMs: numberFromEnv("SANDBOX_WALL_CLOCK_MS", 10000),
+  memoryMB: numberFromEnv("SANDBOX_MEMORY_MB", 256),
+  cpus: numberFromEnv("SANDBOX_CPUS", 1.0),
+  tmpfsMB: numberFromEnv("SANDBOX_TMPFS_MB", 64),
+  stdoutBytes: numberFromEnv("SANDBOX_STDOUT_BYTES", 512 * 1024),
   runtime: runtimeFromEnv(),
 };
 
@@ -141,7 +165,7 @@ export class DockerRunner implements CodeExecRunner {
       `--memory=${cfg.memoryMB}m`,
       `--memory-swap=${cfg.memoryMB}m`,
       `--cpus=${cfg.cpus}`,
-      "--tmpfs=/tmp:size=64m",
+      `--tmpfs=/tmp:size=${cfg.tmpfsMB}m`,
       "--pids-limit=64",
       "--user=sandboxuser",
       "-v", `${codeDir}:/work:ro`,
