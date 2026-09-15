@@ -93,7 +93,15 @@ export const defaultCodeExecConfig: CodeExecConfig = {
   memoryMB: numberFromEnv("SANDBOX_MEMORY_MB", 256),
   cpus: numberFromEnv("SANDBOX_CPUS", 1.0),
   tmpfsMB: numberFromEnv("SANDBOX_TMPFS_MB", 64),
-  stdoutBytes: numberFromEnv("SANDBOX_STDOUT_BYTES", 512 * 1024),
+  /*
+   * A document leaves the sandbox as base64 on stdout, and base64 is a third
+   * longer than the bytes it carries. At 512 KB a deck with one real picture in
+   * it (525 KB on disk, measured 2026-09-15) was cut in half on the way out and
+   * the receiver stored the fragment as a .pptx - PowerPoint called it damaged.
+   * The auto-delivery in sitecustomize.py carries files up to 20 MB, so the
+   * limit has to clear 20 MB * 4/3 plus whatever the program printed itself.
+   */
+  stdoutBytes: numberFromEnv("SANDBOX_STDOUT_BYTES", 32 * 1024 * 1024),
   runtime: runtimeFromEnv(),
 };
 
@@ -177,7 +185,10 @@ export class DockerRunner implements CodeExecRunner {
 
     try {
       const { stdout, stderr } = await execFileAsync("docker", args, {
-        maxBuffer: cfg.stdoutBytes * 2,
+        // Room for the cap itself plus the slack capBytes needs to see that the
+        // limit was passed; without it the run dies on maxBuffer instead of
+        // coming back with a truncated, clearly marked output.
+        maxBuffer: cfg.stdoutBytes * 2 + 1024 * 1024,
         signal: abortSignal,
       });
       return {

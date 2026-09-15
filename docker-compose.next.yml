@@ -44,6 +44,11 @@ services:
       - SANDBOX_MEMORY_MB=${SANDBOX_MEMORY_MB:-768}
       - SANDBOX_CPUS=${SANDBOX_CPUS:-2}
       - SANDBOX_TMPFS_MB=${SANDBOX_TMPFS_MB:-128}
+
+      # A deck leaves as base64 on stdout, a third longer than its bytes. The
+      # old 512 KB cut a deck with one picture in half and the receiver stored
+      # the fragment, which PowerPoint then refused to open.
+      - SANDBOX_STDOUT_BYTES=${SANDBOX_STDOUT_BYTES:-33554432}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.tmp:/app/.tmp
