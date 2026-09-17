@@ -202,6 +202,8 @@ BUILD_HTTP_PROXY=http://10.60.3.254:3128 BUILD_HTTPS_PROXY=http://10.60.3.254:31
   docker compose -p code-exec-mcp-next -f docker-compose.next.yml up -d --build
 ```
 
+**Status 2026-09-17.** HAWKI production (ki-chat) took path A on 2026-09-15: its `code-exec-mcp` gateway alias was switched from `mcp_gVisor` (`:3001`, `code-exec-sandbox:latest`) to `mcp_gVisor_next` (`:3002`, `code-exec-sandbox:pptx`) together with the HAWKI release v2.3.2.5 that understands the file delivery. Both HAWKI hosts now share the `:3002` server; `:3001` keeps running for the other gateway keys that still hold `mcp_gVisor` (KANBAN MCP, kidevlokal_june26, VS-Code). Whether `:3001` is retired or promoted to the new image is still open (Kanban KI-755 / KI-760).
+
 ## Session Management
 
 In HTTP mode each client gets an isolated `McpServer` instance identified by `Mcp-Session-Id` header. Sessions are evicted after **30 minutes** of inactivity. Active session count is visible in `/health`.
