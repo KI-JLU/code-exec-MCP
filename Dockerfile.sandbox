@@ -1,8 +1,81 @@
+# ---------------------------------------------------------------------------
+# Node stage: only here to carry a node binary and the document libraries into
+# the Python image below. The sandbox entrypoint stays `python /work/code.py`
+# (see DockerRunner in src/tools/code_exec.ts), so node is never the process
+# that starts - it is launched from inside the snippet with subprocess.run.
+# ---------------------------------------------------------------------------
+FROM node:22-slim AS nodebuild
+
+# A build behind a proxy (ki-mcp01 has no direct route to the internet) passes
+# --build-arg http_proxy=... --build-arg https_proxy=...; declaring the ARGs here
+# is what puts them in scope for the RUN steps below. They are build time only -
+# unlike an ENV they are not baked into the image, so a sandbox does not carry a
+# proxy address it must never use (it runs with --network=none).
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
+RUN npm install -g pptxgenjs@3.12.0
+
 FROM python:3.13-slim
+
+# A build behind a proxy (ki-mcp01 has no direct route to the internet) passes
+# --build-arg http_proxy=... --build-arg https_proxy=...; declaring the ARGs here
+# is what puts them in scope for the RUN steps below. They are build time only -
+# unlike an ENV they are not baked into the image, so a sandbox does not carry a
+# proxy address it must never use (it runs with --network=none).
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
 
 # Install necessary scientific computing libraries
 # We use --no-cache-dir to keep the image size down
-RUN pip install --no-cache-dir numpy pandas scipy matplotlib
+#
+# python-pptx is the fallback for decks: models are steered to pptxgenjs, but a
+# model that reaches for `import pptx` anyway (gemma did, on the first try) gets
+# a deck instead of a ModuleNotFoundError and a dead end.
+RUN pip install --no-cache-dir numpy pandas scipy matplotlib python-pptx
+
+# LibreOffice converts a generated deck to PDF and poppler rasterises it, so the
+# model can look at the slides it just laid out and correct what overlaps. The
+# layout is absolute coordinates, and nothing else catches a text box placed on
+# top of another one. libreoffice-impress pulls the Impress filters only; there
+# is no JRE - see the javaldx stub below for what that would otherwise print.
+# rsvg-convert rasterises an SVG the model drew before hawki_slides puts it on
+# a slide - python-pptx embeds bitmaps only; LibreOffice Draw is the fallback.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libreoffice-impress \
+        libreoffice-core \
+        fonts-dejavu-core \
+        poppler-utils \
+        librsvg2-bin \
+    && rm -rf /var/lib/apt/lists/* \
+    # oosplash launches javaldx to find a JRE on every start and prints
+    # "Warning: failed to launch javaldx - java may not function correctly"
+    # to stderr when the binary is missing. There is no Java here on purpose,
+    # and that line would reach the model with every conversion. A javaldx
+    # that answers with a directory already on the library path keeps the
+    # start quiet (an empty answer still warns: "failed to read path").
+    && printf '#!/bin/sh\necho /usr/lib/libreoffice/program\n' > /usr/lib/libreoffice/program/javaldx \
+    && chmod +x /usr/lib/libreoffice/program/javaldx
+
+# node plus the globally installed document libraries. NODE_PATH is what makes
+# require('pptxgenjs') resolve from /tmp, where a generated script is written -
+# without it node only searches node_modules next to the script.
+# A failed subprocess explains itself: see the file for why.
+COPY sandbox/sitecustomize.py /usr/local/lib/python3.13/site-packages/sitecustomize.py
+
+COPY --from=nodebuild /usr/local/bin/node /usr/local/bin/node
+COPY --from=nodebuild /usr/local/lib/node_modules /usr/local/lib/node_modules
+ENV NODE_PATH=/usr/local/lib/node_modules
+
+# hawki_slides: a deck in a dozen Python calls on the JLU template (German or
+# English by language), one of HAWKI's own drawn styles, or a template the
+# user attached - so a model does not have to remember python-pptx's API. The
+# same idea as the helper module OpenAI mounts into its sandbox.
+COPY sandbox/hawki_slides /usr/local/lib/python3.13/site-packages/hawki_slides
+COPY sandbox/templates /usr/local/share/hawki-slides/templates
 
 # Agg is a non-interactive PNG backend — no display server needed inside the container
 ENV MPLBACKEND=Agg
@@ -12,5 +85,10 @@ ENV MPLCONFIGDIR=/tmp
 # Set a non-root user for extra security (even though runsc is used)
 RUN useradd -m sandboxuser
 USER sandboxuser
+
+# The root filesystem is mounted read-only, so the real home is not writable and
+# LibreOffice exits 77 when it cannot create its profile there. Pointing HOME at
+# the tmpfs keeps that from reaching the snippet as an unexplained exit code.
+ENV HOME=/tmp
 
 WORKDIR /work

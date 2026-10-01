@@ -10,13 +10,11 @@ services:
       - MCP_TRANSPORT=http
       - MCP_PORT=3001
       - MCP_DEBUG=true
-    restart: unless-stopped
-  
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./.tmp:/app/.tmp
     healthcheck:
-      test: [ "CMD", "wget", "-qO-", "http://localhost:3001/health" ]
+      test: [ "CMD", "wget", "-qO-", "-Y", "off", "http://localhost:3001/health" ]
       interval: 30s
       timeout: 5s
       retries: 3

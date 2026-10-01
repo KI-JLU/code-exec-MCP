@@ -5,3 +5,4 @@ dist/
 .tmp/
 .claude/
 test_node.js
+.DS_Store

@@ -1,0 +1,61 @@
+# A second code-exec-mcp next to the running one, for testing a new sandbox
+# image without touching production.
+#
+# The image with the document toolchain (LibreOffice, node, hawki_slides) is a
+# behaviour change for every caller: documents left in /tmp are delivered as
+# data URIs at exit, and a HAWKI that predates that feature does not recognise
+# them - it passes the base64 to the model instead. So the new image is not
+# rolled out under the old server; it gets a server of its own on another port,
+# reached through a second gateway alias, while production keeps :3001 and
+# code-exec-sandbox:latest.
+#
+#   cd /root/code-exec-MCP-next
+#   docker compose -p code-exec-mcp-next -f docker-compose.next.yml up -d --build
+#
+# On a host without a direct route to the internet (ki-mcp01), both builds need
+# the proxy passed in - see README, "Second server for a new sandbox image".
+services:
+  mcp-server:
+    build:
+      context: .
+      args:
+        DOCKER_GID: ${DOCKER_GID:-985}
+        http_proxy: ${BUILD_HTTP_PROXY:-}
+        https_proxy: ${BUILD_HTTPS_PROXY:-}
+    image: code-exec-mcp-next:latest
+    ports:
+      - "3002:3002"
+    environment:
+      - MCP_TRANSPORT=http
+      - MCP_PORT=3002
+      - MCP_DEBUG=true
+      - SANDBOX_HOST_TMP=${PWD}/.tmp
+
+      # The image under test. Built from Dockerfile.sandbox in this directory
+      # and tagged by hand, so the production tag (code-exec-sandbox:latest) is
+      # never overwritten by a build here.
+      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-code-exec-sandbox:pptx}
+
+      # A deck is built, converted by LibreOffice and rasterised in one run, on
+      # two shared cores under gVisor - the defaults (10 s, 256 MB, 64 MB /tmp)
+      # are sized for a matplotlib plot and are not enough. HAWKI allows this
+      # tool 120 s, so the wall clock stays under that.
+      - SANDBOX_WALL_CLOCK_MS=${SANDBOX_WALL_CLOCK_MS:-60000}
+      - SANDBOX_MEMORY_MB=${SANDBOX_MEMORY_MB:-768}
+      - SANDBOX_CPUS=${SANDBOX_CPUS:-2}
+      - SANDBOX_TMPFS_MB=${SANDBOX_TMPFS_MB:-128}
+
+      # A deck leaves as base64 on stdout, a third longer than its bytes. The
+      # old 512 KB cut a deck with one picture in half and the receiver stored
+      # the fragment, which PowerPoint then refused to open.
+      - SANDBOX_STDOUT_BYTES=${SANDBOX_STDOUT_BYTES:-33554432}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.tmp:/app/.tmp
+    healthcheck:
+      test: [ "CMD", "wget", "-qO-", "-Y", "off", "http://localhost:3002/health" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
